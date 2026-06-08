@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://jamiierfc1872.github.io/sitemap.xml
