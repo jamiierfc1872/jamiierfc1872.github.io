@@ -276,9 +276,23 @@ function removeEntry(id){
    Local storage stays the source of truth; the server is a meeting point.
    Merging is by id both ends, so order and repetition don't matter, and it
    simply does nothing when the tailnet isn't reachable. */
-var SYNC_URL = "https://racing-vps.tail8f4be8.ts.net/gut-sync/data";
+var SYNC_URL = "https://167.99.206.65.sslip.io/gut-sync/data";
+var KEY_STORE = "gutTrackerKey";
 var sync = {busy:false, ok:null, error:null, at:null};
 var syncTimer = null;
+
+/* The sync key never appears in this file. It arrives once per device in the
+   link fragment (#key=...), which browsers do not send to servers and do not
+   put in logs. We stash it locally and strip it from the address bar. */
+var syncKey = (function(){
+  var m = /(?:^|[#&])key=([A-Za-z0-9_-]{16,})/.exec(location.hash || "");
+  if(m){
+    try{ localStorage.setItem(KEY_STORE, m[1]); }catch(e){}
+    try{ history.replaceState(null, "", location.pathname + location.search); }catch(e){}
+    return m[1];
+  }
+  try{ return localStorage.getItem(KEY_STORE) || ""; }catch(e){ return ""; }
+})();
 
 function syncSoon(){
   clearTimeout(syncTimer);
@@ -287,10 +301,11 @@ function syncSoon(){
 
 function syncNow(){
   if(sync.busy || typeof fetch !== "function") return;
+  if(!syncKey){ sync.ok = false; sync.error = "no sync key on this device"; return; }
   sync.busy = true;
   fetch(SYNC_URL, {
     method:"POST",
-    headers:{"Content-Type":"application/json"},
+    headers:{"Content-Type":"application/json", "Authorization":"Bearer " + syncKey},
     body: JSON.stringify({v:1, entries:db.entries, deleted:db.deleted || []})
   })
   .then(function(r){
@@ -327,7 +342,7 @@ var TAGS = ["Dairy","Milk","Cheese","Ice cream","Pasta","Bread","Onion / garlic"
 var MEDS = ["Loperamide","Fybogel","Buscopan","Peppermint oil","Other"];
 var DRINKS = ["Water","Squash / cordial","Fruit juice","Fizzy drink","Sugar-free drink",
               "Milk","Tea / coffee","Alcohol","Other"];
-var APP_VERSION = "v9 — 25 Jul 2026";
+var APP_VERSION = "v10 — 25 Jul 2026";
 
 /* Words that hint at a tag. Deliberately cautious — a missed suggestion costs
    nothing, a wrong one quietly corrupts the data. Matched on word starts, so
@@ -1094,18 +1109,25 @@ function renderExport(){
       'Survived a previous visit: <b style="color:' + (STORAGE.survived ? 'var(--accent)' : 'var(--bad)') + '">' +
         (STORAGE.survived ? 'YES' : 'NO') + '</b><br>' +
       'Entries held now: <b>' + db.entries.length + '</b><br>' +
-      'Sync: ' + (sync.ok === true
-          ? '<b style="color:var(--accent)">working</b>'
-          : (sync.ok === false
-              ? '<b style="color:var(--warn)">not reachable</b> &mdash; needs Tailscale on'
-              : '<b style="color:var(--muted)">not tried yet</b>')) +
+      'Sync: ' + (!syncKey
+          ? '<b style="color:var(--warn)">not set up on this device</b>'
+          : (sync.ok === true
+              ? '<b style="color:var(--accent)">working</b>'
+              : (sync.ok === false
+                  ? '<b style="color:var(--warn)">not connecting</b>' +
+                    (sync.error ? ' &mdash; ' + esc(sync.error) : "")
+                  : '<b style="color:var(--muted)">not tried yet</b>'))) +
       (db.lastSync ? '<br>Last synced: ' + esc(new Date(db.lastSync).toLocaleString("en-GB")) : "") +
       (STORAGE.error ? '<br>Error: <b style="color:var(--bad)">' + esc(STORAGE.error) + '</b>' : "") +
     '</div></div>' +
     '<button class="btn ghost" id="syncNow">Sync now</button>' +
-    '<p class="hint" style="margin-top:12px">Sync needs Tailscale running on this device. ' +
-    'When it can\'t reach the server it just keeps everything locally and catches up later &mdash; ' +
-    'nothing is lost either way.</p>' +
+    '<p class="hint" style="margin-top:12px">' +
+      (syncKey
+        ? 'Your phone and PC share one diary. When there\'s no signal it keeps everything ' +
+          'locally and catches up next time &mdash; nothing is lost either way.'
+        : 'This device hasn\'t been paired yet. Open the setup link Claude gave you, once, ' +
+          'on this device.') +
+    '</p>' +
     '<h2 style="margin-top:32px">For your GP</h2>' +
     '<pre class="summary" id="sum">'+esc(buildSummary())+'</pre>' +
     '<div style="margin-top:12px">' +
