@@ -246,9 +246,10 @@ function load(){
     var raw = localStorage.getItem(KEY);
     if(!raw) return {v:1, entries:[]};
     var d = JSON.parse(raw);
-    if(!d || !Array.isArray(d.entries)) return {v:1, entries:[]};
+    if(!d || !Array.isArray(d.entries)) return {v:1, entries:[], deleted:[]};
+    if(!Array.isArray(d.deleted)) d.deleted = [];
     return d;
-  }catch(e){ return {v:1, entries:[]}; }
+  }catch(e){ return {v:1, entries:[], deleted:[]}; }
 }
 function save(){
   try{ localStorage.setItem(KEY, JSON.stringify(db)); }
@@ -259,6 +260,58 @@ function add(entry){
   db.entries.push(entry);
   db.entries.sort(function(a,b){ return a.ts < b.ts ? -1 : 1; });
   save();
+  syncSoon();
+}
+
+function removeEntry(id){
+  db.entries = db.entries.filter(function(e){ return e.id !== id; });
+  if(!db.deleted) db.deleted = [];
+  // tombstone, so a sync from the other device can't resurrect it
+  if(db.deleted.indexOf(id) === -1) db.deleted.push(id);
+  save();
+  syncSoon();
+}
+
+/* ---------- sync ----------
+   Local storage stays the source of truth; the server is a meeting point.
+   Merging is by id both ends, so order and repetition don't matter, and it
+   simply does nothing when the tailnet isn't reachable. */
+var SYNC_URL = "https://racing-vps.tail8f4be8.ts.net/gut-sync/data";
+var sync = {busy:false, ok:null, error:null, at:null};
+var syncTimer = null;
+
+function syncSoon(){
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(syncNow, 1500);
+}
+
+function syncNow(){
+  if(sync.busy || typeof fetch !== "function") return;
+  sync.busy = true;
+  fetch(SYNC_URL, {
+    method:"POST",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({v:1, entries:db.entries, deleted:db.deleted || []})
+  })
+  .then(function(r){
+    if(!r.ok) throw new Error("HTTP " + r.status);
+    return r.json();
+  })
+  .then(function(merged){
+    if(merged && Array.isArray(merged.entries)){
+      db.entries = merged.entries;
+      db.deleted = Array.isArray(merged.deleted) ? merged.deleted : [];
+      db.lastSync = Date.now();
+      save();
+    }
+    sync.busy = false; sync.ok = true; sync.error = null; sync.at = Date.now();
+    // never redraw a form the user might be part-way through filling
+    if(screen==="log" || screen==="today" || screen==="stats" || screen==="export") render();
+  })
+  .catch(function(e){
+    sync.busy = false; sync.ok = false; sync.at = Date.now();
+    sync.error = (e && e.message) ? e.message : "unreachable";
+  });
 }
 
 /* ---------- helpers ---------- */
@@ -274,7 +327,7 @@ var TAGS = ["Dairy","Milk","Cheese","Ice cream","Pasta","Bread","Onion / garlic"
 var MEDS = ["Loperamide","Fybogel","Buscopan","Peppermint oil","Other"];
 var DRINKS = ["Water","Squash / cordial","Fruit juice","Fizzy drink","Sugar-free drink",
               "Milk","Tea / coffee","Alcohol","Other"];
-var APP_VERSION = "v8 — 25 Jul 2026";
+var APP_VERSION = "v9 — 25 Jul 2026";
 
 /* Words that hint at a tag. Deliberately cautious — a missed suggestion costs
    nothing, a wrong one quietly corrupts the data. Matched on word starts, so
@@ -787,8 +840,8 @@ function renderHistory(){
   [].forEach.call(view.querySelectorAll(".del"), function(b){
     b.addEventListener("click", function(){
       if(!confirm("Delete this entry?")) return;
-      db.entries = db.entries.filter(function(e){ return e.id !== b.dataset.id; });
-      save(); render();
+      removeEntry(b.dataset.id);
+      render();
     });
   });
 }
@@ -1034,18 +1087,25 @@ function download(name, text, mime){
 function renderExport(){
   var n = db.entries.length;
   view.innerHTML =
-    '<h2>Storage check</h2>' +
+    '<h2>Storage &amp; sync</h2>' +
     '<div class="stat"><div style="font-size:14px;line-height:1.7">' +
       'Can save right now: <b style="color:' + (STORAGE.canWrite ? 'var(--accent)' : 'var(--bad)') + '">' +
         (STORAGE.canWrite ? 'YES' : 'NO') + '</b><br>' +
       'Survived a previous visit: <b style="color:' + (STORAGE.survived ? 'var(--accent)' : 'var(--bad)') + '">' +
         (STORAGE.survived ? 'YES' : 'NO') + '</b><br>' +
-      (STORAGE.lastSeen ? 'Last opened: ' + esc(STORAGE.lastSeen) + '<br>' : "") +
-      'Entries held now: <b>' + db.entries.length + '</b>' +
+      'Entries held now: <b>' + db.entries.length + '</b><br>' +
+      'Sync: ' + (sync.ok === true
+          ? '<b style="color:var(--accent)">working</b>'
+          : (sync.ok === false
+              ? '<b style="color:var(--warn)">not reachable</b> &mdash; needs Tailscale on'
+              : '<b style="color:var(--muted)">not tried yet</b>')) +
+      (db.lastSync ? '<br>Last synced: ' + esc(new Date(db.lastSync).toLocaleString("en-GB")) : "") +
       (STORAGE.error ? '<br>Error: <b style="color:var(--bad)">' + esc(STORAGE.error) + '</b>' : "") +
     '</div></div>' +
-    '<p class="hint">If either line says NO, this browser is throwing your diary away. ' +
-    'Send Claude a screenshot of this box.</p>' +
+    '<button class="btn ghost" id="syncNow">Sync now</button>' +
+    '<p class="hint" style="margin-top:12px">Sync needs Tailscale running on this device. ' +
+    'When it can\'t reach the server it just keeps everything locally and catches up later &mdash; ' +
+    'nothing is lost either way.</p>' +
     '<h2 style="margin-top:32px">For your GP</h2>' +
     '<pre class="summary" id="sum">'+esc(buildSummary())+'</pre>' +
     '<div style="margin-top:12px">' +
@@ -1065,6 +1125,10 @@ function renderExport(){
     '<h2 style="margin-top:32px">Start over</h2>' +
     '<button class="btn danger" id="wipe">Delete everything</button>';
 
+  document.getElementById("syncNow").addEventListener("click", function(){
+    toast("Syncing…");
+    syncNow();
+  });
   document.getElementById("copySum").addEventListener("click", function(){
     var txt = buildSummary();
     if(navigator.clipboard && navigator.clipboard.writeText){
@@ -1126,9 +1190,13 @@ function renderExport(){
     fr.readAsText(file);
   });
   document.getElementById("wipe").addEventListener("click", function(){
-    if(!confirm("Delete all logged data? This cannot be undone.")) return;
-    if(!confirm("Really sure? Download the CSV first if you want a copy.")) return;
-    db = {v:1, entries:[]}; save(); toast("Deleted"); go("log");
+    if(!confirm("Delete all logged data, on every device? This cannot be undone.")) return;
+    if(!confirm("Really sure? Download a backup first if you want a copy.")) return;
+    // tombstone everything so the deletion travels, rather than syncing back
+    var ids = db.entries.map(function(e){ return e.id; });
+    db.deleted = (db.deleted || []).concat(ids);
+    db.entries = [];
+    save(); syncSoon(); toast("Deleted"); go("log");
   });
 }
 
@@ -1141,6 +1209,11 @@ if("serviceWorker" in navigator && location.protocol === "https:"){
 
 /* ---------- go ---------- */
 go("log");
+syncNow();
+// pick up anything logged on the other device when returning to the app
+document.addEventListener("visibilitychange", function(){
+  if(!document.hidden) syncSoon();
+});
 
 })();
 </script>
